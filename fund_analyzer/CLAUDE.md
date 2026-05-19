@@ -29,12 +29,14 @@ streamlit run app.py
 | 每日资讯 | `daily_market.py` | 行业/概念资金流向、板块异动、持仓赛道关联分析。行业名称使用 `INDUSTRY_NAME_MAP` 映射 + `difflib.get_close_matches` 模糊匹配 |
 | 报告生成 | `report_generator.py` | HTML/Markdown 报告，图片以 base64 内嵌。提供 `generate_*_content()` 返回字符串（供 Streamlit 下载按钮使用） |
 | Web 界面 | `app.py` | Streamlit 可视化入口，session_state 管理持仓列表。报告通过下载按钮获取，不自动写入磁盘 |
+| AI 投资顾问 | `ai_advisor.py` | 封装 Anthropic Claude API，根据持仓和分析结果构建系统提示，提供对话式投资建议 |
 
 ## 关键已知问题（不可修改）
 
 1. **PE 数据排序**：`ak.stock_index_pe_lg()` 返回的数据是旧→新排列。`data_fetcher.py` 中已强制按日期降序排列。**不可移除该排序逻辑。**
 2. **PE 列选择**：沪深300 PE 数据有多列（等权静态、静态、等权滚动、滚动）。分析时必须优先选择 `滚动市盈率`（TTM PE），排除 `等权` 和 `中位数` 列。相关逻辑分布在 `get_dca_strategy()` 和 `analyze_market_valuation()` 中。
 3. **Streamlit 表单行为**：`st.form` 内部的交互不会触发重新渲染。条件输入控件（如 radio 切换）必须放在表单外部。参考 `app.py` 中成本录入方式的 radio 放在 `st.form` 外。
+4. **AI 顾问 API Key**：`ai_advisor.py` 优先读取环境变量 `ANTHROPIC_API_KEY`，其次是 Streamlit Secrets。本地开发时可在终端 `export` 设置；Streamlit Cloud 部署时在 **Settings → Secrets** 中添加。**禁止**将 API Key 硬编码到代码或提交到 git。
 
 ## 用户偏好
 
