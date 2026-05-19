@@ -27,6 +27,7 @@ from fund_comparison import analyze_funds_comparison
 from portfolio_advisor import generate_portfolio_advice
 from report_generator import generate_html_report_content, generate_markdown_summary_content
 from daily_market import build_daily_sector_report
+from ai_advisor import get_api_key, build_system_prompt, chat_with_advisor, get_available_models
 
 
 def format_sector_df(df, table_type):
@@ -125,6 +126,10 @@ def init_state():
         "analyzing": False,
         "sector_report": None,
         "loading_sectors": False,
+        "chat_history": [],
+        "chat_model": "claude-3-5-sonnet-20241022",
+        "chat_api_key": "",
+        "chat_initialized": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -196,6 +201,15 @@ st.session_state.monthly_base = st.sidebar.number_input(
 st.sidebar.markdown("---")
 st.sidebar.info("💡 提示：配置完成后，点击主界面「开始分析」按钮。")
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🧭 页面导航")
+page = st.sidebar.radio(
+    "选择页面",
+    options=["📊 分析面板", "🤖 AI投资顾问"],
+    index=0,
+    label_visibility="collapsed",
+)
+
 # ==================== 主界面头部 ====================
 st.markdown('<div class="main-header">📈 基金投资分析系统</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">基于过去十年金融知识，为您的基金投资提供全方位分析与建议</div>', unsafe_allow_html=True)
@@ -265,6 +279,82 @@ with sector_expander:
                 st.info("暂无人气个股数据")
     else:
         st.info("点击上方「刷新赛道数据」按钮获取最新市场资讯。")
+
+st.markdown("---")
+
+# ==================== AI 投资顾问 ====================
+ai_expander = st.expander("🤖 AI投资顾问（看完资讯后，点击此处与我对话）", expanded=False)
+with ai_expander:
+    # API Key 检测与配置
+    env_key = get_api_key()
+    if env_key:
+        st.success("✅ 已检测到 API Key（来自环境变量或 Secrets）")
+        api_key = env_key
+    else:
+        st.warning("⚠️ 未检测到 Anthropic API Key")
+        api_key = st.text_input(
+            "请输入你的 Anthropic API Key（仅当前会话使用，不会保存）：",
+            type="password",
+            value=st.session_state.chat_api_key,
+            key="ai_api_key_input",
+        )
+        st.session_state.chat_api_key = api_key
+        if not api_key:
+            st.info("💡 获取方式：访问 https://console.anthropic.com/settings/keys 创建 API Key")
+            st.stop()
+
+    # 模型选择
+    model_cols = st.columns([3, 1])
+    with model_cols[0]:
+        available_models = get_available_models()
+        selected_model = st.selectbox(
+            "选择模型",
+            options=available_models,
+            index=available_models.index(st.session_state.chat_model)
+            if st.session_state.chat_model in available_models else 0,
+            key="ai_model_select",
+        )
+        st.session_state.chat_model = selected_model
+    with model_cols[1]:
+        if st.button("🗑️ 清空对话", key="clear_chat"):
+            st.session_state.chat_history = []
+            st.session_state.chat_initialized = False
+            st.rerun()
+
+    # 初始化系统提示（首次进入或有新分析结果时）
+    portfolio_dict_list = st.session_state.portfolio
+    results = st.session_state.results
+    sector_rep = st.session_state.sector_report
+
+    if not st.session_state.chat_initialized and portfolio_dict_list:
+        system_prompt = build_system_prompt(portfolio_dict_list, results, sector_rep)
+        st.session_state.chat_history = [{"role": "system", "content": system_prompt}]
+        st.session_state.chat_initialized = True
+
+    # 显示对话历史
+    for msg in st.session_state.chat_history:
+        if msg.get("role") == "system":
+            continue
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # 用户输入
+    user_input = st.chat_input("请输入你的投资问题...", key="chat_input")
+    if user_input:
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        with st.chat_message("assistant"):
+            with st.spinner("思考中..."):
+                reply = chat_with_advisor(
+                    st.session_state.chat_history,
+                    api_key=api_key,
+                    model=st.session_state.chat_model,
+                )
+            st.markdown(reply)
+        st.session_state.chat_history.append({"role": "assistant", "content": reply})
+        st.rerun()
 
 st.markdown("---")
 
