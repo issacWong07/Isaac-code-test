@@ -33,3 +33,4 @@ xhs_results*.json
 *.pptx
 *.docx
 *.html
+.streamlit/secrets.toml
