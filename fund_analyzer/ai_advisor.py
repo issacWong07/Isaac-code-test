@@ -247,9 +247,14 @@ def _call_kimi(messages: List[Dict[str, str]], api_key: str, model: str, max_tok
         raise ImportError("未安装 openai SDK，请执行：pip install openai") from e
 
     # 清理 Key 前后空格（常见导致 401 的原因）
+    raw_key = api_key
     api_key = api_key.strip()
     if not api_key:
         raise ValueError("API Key 为空")
+
+    # 调试信息（脱敏）
+    key_preview = api_key[:10] + "..." + api_key[-4:] if len(api_key) > 14 else "(长度不足14)"
+    key_len = len(api_key)
 
     # 尝试中国大陆和国际两个端点
     base_urls = [
@@ -279,15 +284,19 @@ def _call_kimi(messages: List[Dict[str, str]], api_key: str, model: str, max_tok
             return response.choices[0].message.content
         except Exception as e:
             last_error = e
-            # 如果是 401，继续尝试下一个端点
             error_str = str(e)
+            # 如果是 401，继续尝试下一个端点
             if "401" in error_str or "Invalid Authentication" in error_str:
                 continue
             # 其他错误直接抛出
             raise
     # 两个端点都失败
     if last_error:
-        raise last_error
+        raise Exception(
+            f"{last_error}\n\n"
+            f"[调试信息] Key 前缀: {key_preview}, 长度: {key_len}, "
+            f"模型: {model}, 端点: {', '.join(base_urls)}"
+        )
     raise RuntimeError("所有 Kimi API 端点均无法连接")
 
 
