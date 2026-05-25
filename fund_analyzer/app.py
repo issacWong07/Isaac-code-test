@@ -27,7 +27,10 @@ from fund_comparison import analyze_funds_comparison
 from portfolio_advisor import generate_portfolio_advice
 from report_generator import generate_html_report_content, generate_markdown_summary_content
 from daily_market import build_daily_sector_report
-from ai_advisor import get_api_key, build_system_prompt, chat_with_advisor, get_available_models
+from ai_advisor import (
+    get_api_key, build_system_prompt, chat_with_advisor,
+    get_available_models, get_available_providers,
+)
 
 
 def format_sector_df(df, table_type):
@@ -127,6 +130,7 @@ def init_state():
         "sector_report": None,
         "loading_sectors": False,
         "chat_history": [],
+        "chat_provider": "claude",
         "chat_model": "claude-3-5-sonnet-20241022",
         "chat_api_key": "",
         "chat_initialized": False,
@@ -285,28 +289,50 @@ st.markdown("---")
 # ==================== AI 投资顾问 ====================
 ai_expander = st.expander("🤖 AI投资顾问（看完资讯后，点击此处与我对话）", expanded=False)
 with ai_expander:
+    # Provider 选择
+    providers = get_available_providers()
+    provider_options = {p["name"]: p["id"] for p in providers}
+    selected_provider_name = st.selectbox(
+        "选择 AI 提供商",
+        options=list(provider_options.keys()),
+        index=list(provider_options.values()).index(st.session_state.chat_provider)
+        if st.session_state.chat_provider in provider_options.values() else 0,
+        key="ai_provider_select",
+    )
+    selected_provider = provider_options[selected_provider_name]
+
+    # Provider 切换时重置模型为默认值
+    if selected_provider != st.session_state.chat_provider:
+        st.session_state.chat_provider = selected_provider
+        default_models = get_available_models(selected_provider)
+        st.session_state.chat_model = default_models[0] if default_models else ""
+        st.rerun()
+
     # API Key 检测与配置
-    env_key = get_api_key()
+    env_key = get_api_key(selected_provider)
     if env_key:
-        st.success("✅ 已检测到 API Key（来自环境变量或 Secrets）")
+        st.success(f"✅ 已检测到 {selected_provider_name} API Key（来自环境变量或 Secrets）")
         api_key = env_key
     else:
-        st.warning("⚠️ 未检测到 Anthropic API Key")
+        st.warning(f"⚠️ 未检测到 {selected_provider_name} API Key")
         api_key = st.text_input(
-            "请输入你的 Anthropic API Key（仅当前会话使用，不会保存）：",
+            f"请输入你的 {selected_provider_name} API Key（仅当前会话使用，不会保存）：",
             type="password",
             value=st.session_state.chat_api_key,
             key="ai_api_key_input",
         )
         st.session_state.chat_api_key = api_key
         if not api_key:
-            st.info("💡 获取方式：访问 https://console.anthropic.com/settings/keys 创建 API Key")
+            if selected_provider == "kimi":
+                st.info("💡 获取方式：访问 https://platform.moonshot.cn/console/api-keys 创建 API Key")
+            else:
+                st.info("💡 获取方式：访问 https://console.anthropic.com/settings/keys 创建 API Key")
             st.stop()
 
     # 模型选择
     model_cols = st.columns([3, 1])
     with model_cols[0]:
-        available_models = get_available_models()
+        available_models = get_available_models(selected_provider)
         selected_model = st.selectbox(
             "选择模型",
             options=available_models,
@@ -350,6 +376,7 @@ with ai_expander:
                 reply = chat_with_advisor(
                     st.session_state.chat_history,
                     api_key=api_key,
+                    provider=selected_provider,
                     model=st.session_state.chat_model,
                 )
             st.markdown(reply)

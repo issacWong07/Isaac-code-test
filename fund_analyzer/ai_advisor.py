@@ -1,22 +1,70 @@
 """
-AI 投资顾问模块 - 基于 Claude API 的智能对话建议
+AI 投资顾问模块 - 支持 Claude (Anthropic) 和 Kimi (Moonshot) 双后端
 """
 
 import os
 from typing import List, Dict, Optional
 
+# ==================== Provider 配置 ====================
 
-def get_api_key() -> Optional[str]:
-    """获取 Anthropic API Key，优先级：环境变量 > Streamlit secrets"""
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
+PROVIDERS = {
+    "claude": {
+        "name": "Claude (Anthropic)",
+        "env_key": "ANTHROPIC_API_KEY",
+        "secret_key": "ANTHROPIC_API_KEY",
+        "models": [
+            "claude-3-5-sonnet-20241022",
+            "claude-3-opus-20240229",
+            "claude-3-5-haiku-20241022",
+        ],
+    },
+    "kimi": {
+        "name": "Kimi (Moonshot)",
+        "env_key": "KIMI_API_KEY",
+        "secret_key": "KIMI_API_KEY",
+        "models": [
+            "kimi-k2-6",
+            "moonshot-v1-8k",
+            "moonshot-v1-32k",
+            "moonshot-v1-128k",
+        ],
+    },
+}
+
+
+def get_api_key(provider: str = "claude") -> Optional[str]:
+    """获取指定 Provider 的 API Key，优先级：环境变量 > Streamlit secrets。
+
+    Args:
+        provider: 提供商标识，"claude" 或 "kimi"
+    """
+    cfg = PROVIDERS.get(provider)
+    if not cfg:
+        return None
+
+    # 1. 环境变量
+    key = os.environ.get(cfg["env_key"], "")
     if key:
         return key
+
+    # 2. Streamlit Secrets
     try:
         import streamlit as st
-        key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        key = st.secrets.get(cfg["secret_key"], "")
     except Exception:
         pass
+
     return key if key else None
+
+
+def get_available_providers() -> List[Dict[str, str]]:
+    """返回所有支持的 Provider 列表。"""
+    return [{"id": k, "name": v["name"]} for k, v in PROVIDERS.items()]
+
+
+def get_available_models(provider: str = "claude") -> List[str]:
+    """返回指定 Provider 的推荐模型列表。"""
+    return PROVIDERS.get(provider, {}).get("models", [])
 
 
 def build_system_prompt(portfolio: List[dict], results: Optional[dict] = None,
@@ -99,23 +147,8 @@ def build_system_prompt(portfolio: List[dict], results: Optional[dict] = None,
     return "\n".join(lines)
 
 
-def chat_with_advisor(
-    messages: List[Dict[str, str]],
-    api_key: str,
-    model: str = "claude-3-5-sonnet-20241022",
-    max_tokens: int = 2048,
-) -> str:
-    """调用 Claude API 获取投资顾问回复。
-
-    Args:
-        messages: 对话历史，格式 [{"role": "user"/"assistant", "content": "..."}]
-        api_key: Anthropic API Key
-        model: 模型名称
-        max_tokens: 最大生成token数
-
-    Returns:
-        AI 回复文本
-    """
+def _call_claude(messages: List[Dict[str, str]], api_key: str, model: str, max_tokens: int) -> str:
+    """调用 Anthropic Claude API。"""
     try:
         import anthropic
     except ImportError as e:
@@ -139,17 +172,61 @@ def chat_with_advisor(
     if system:
         kwargs["system"] = system
 
+    response = client.messages.create(**kwargs)
+    return response.content[0].text
+
+
+def _call_kimi(messages: List[Dict[str, str]], api_key: str, model: str, max_tokens: int) -> str:
+    """调用 Kimi (Moonshot) API（OpenAI 兼容格式）。"""
     try:
-        response = client.messages.create(**kwargs)
-        return response.content[0].text
+        from openai import OpenAI
+    except ImportError as e:
+        raise ImportError("未安装 openai SDK，请执行：pip install openai") from e
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://api.moonshot.cn/v1",
+    )
+
+    # OpenAI 格式不支持独立 system 字段，合并到 messages 中
+    api_messages = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            api_messages.append({"role": "system", "content": msg["content"]})
+        else:
+            api_messages.append({"role": msg["role"], "content": msg["content"]})
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=api_messages,
+        max_tokens=max_tokens,
+    )
+    return response.choices[0].message.content
+
+
+def chat_with_advisor(
+    messages: List[Dict[str, str]],
+    api_key: str,
+    provider: str = "claude",
+    model: str = "claude-3-5-sonnet-20241022",
+    max_tokens: int = 2048,
+) -> str:
+    """调用指定 Provider 的 API 获取投资顾问回复。
+
+    Args:
+        messages: 对话历史，格式 [{"role": "user"/"assistant"/"system", "content": "..."}]
+        api_key: API Key
+        provider: 提供商，"claude" 或 "kimi"
+        model: 模型名称
+        max_tokens: 最大生成 token 数
+
+    Returns:
+        AI 回复文本
+    """
+    try:
+        if provider == "kimi":
+            return _call_kimi(messages, api_key, model, max_tokens)
+        else:
+            return _call_claude(messages, api_key, model, max_tokens)
     except Exception as e:
         return f"调用 AI 服务失败：{e}"
-
-
-def get_available_models() -> List[str]:
-    """返回推荐的可用模型列表。"""
-    return [
-        "claude-3-5-sonnet-20241022",
-        "claude-3-opus-20240229",
-        "claude-3-5-haiku-20241022",
-    ]
