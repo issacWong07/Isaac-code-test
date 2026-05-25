@@ -3,7 +3,64 @@ AI 投资顾问模块 - 支持 Claude (Anthropic) 和 Kimi (Moonshot) 双后端
 """
 
 import os
+import json
+import base64
+from pathlib import Path
 from typing import List, Dict, Optional
+
+# 本地配置文件（base64 编码存储，不提交到 git）
+_CONFIG_DIR = Path.home() / ".fund_analyzer"
+_CONFIG_FILE = _CONFIG_DIR / "config.json"
+
+
+def _encode_key(key: str) -> str:
+    return base64.b64encode(key.encode()).decode()
+
+
+def _decode_key(encoded: str) -> str:
+    return base64.b64decode(encoded.encode()).decode()
+
+
+def load_saved_key(provider: str) -> Optional[str]:
+    """从本地配置文件读取已保存的 API Key。"""
+    if not _CONFIG_FILE.exists():
+        return None
+    try:
+        with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        encoded = config.get(provider, "")
+        return _decode_key(encoded) if encoded else None
+    except Exception:
+        return None
+
+
+def save_key(provider: str, key: str) -> None:
+    """保存 API Key 到本地配置文件。"""
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    config = {}
+    if _CONFIG_FILE.exists():
+        try:
+            with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except Exception:
+            pass
+    config[provider] = _encode_key(key)
+    with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f)
+
+
+def delete_saved_key(provider: str) -> None:
+    """删除已保存的 API Key。"""
+    if not _CONFIG_FILE.exists():
+        return
+    try:
+        with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        config.pop(provider, None)
+        with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f)
+    except Exception:
+        pass
 
 # ==================== Provider 配置 ====================
 
@@ -33,10 +90,13 @@ PROVIDERS = {
 
 
 def get_api_key(provider: str = "claude") -> Optional[str]:
-    """获取指定 Provider 的 API Key，优先级：环境变量 > Streamlit secrets。
+    """获取指定 Provider 的 API Key，优先级：环境变量 > Streamlit secrets > 本地文件。
 
     Args:
         provider: 提供商标识，"claude" 或 "kimi"
+
+    Returns:
+        API Key 字符串，或 None
     """
     cfg = PROVIDERS.get(provider)
     if not cfg:
@@ -53,8 +113,11 @@ def get_api_key(provider: str = "claude") -> Optional[str]:
         key = st.secrets.get(cfg["secret_key"], "")
     except Exception:
         pass
+    if key:
+        return key
 
-    return key if key else None
+    # 3. 本地配置文件
+    return load_saved_key(provider)
 
 
 def get_available_providers() -> List[Dict[str, str]]:
@@ -183,25 +246,49 @@ def _call_kimi(messages: List[Dict[str, str]], api_key: str, model: str, max_tok
     except ImportError as e:
         raise ImportError("未安装 openai SDK，请执行：pip install openai") from e
 
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://api.moonshot.cn/v1",
-    )
+    # 清理 Key 前后空格（常见导致 401 的原因）
+    api_key = api_key.strip()
+    if not api_key:
+        raise ValueError("API Key 为空")
 
-    # OpenAI 格式不支持独立 system 字段，合并到 messages 中
-    api_messages = []
-    for msg in messages:
-        if msg.get("role") == "system":
-            api_messages.append({"role": "system", "content": msg["content"]})
-        else:
-            api_messages.append({"role": msg["role"], "content": msg["content"]})
+    # 尝试中国大陆和国际两个端点
+    base_urls = [
+        "https://api.moonshot.cn/v1",
+        "https://api.moonshot.ai/v1",
+    ]
+    last_error = None
+    for base_url in base_urls:
+        try:
+            client = OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+            )
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=api_messages,
-        max_tokens=max_tokens,
-    )
-    return response.choices[0].message.content
+            api_messages = []
+            for msg in messages:
+                if msg.get("role") == "system":
+                    api_messages.append({"role": "system", "content": msg["content"]})
+                else:
+                    api_messages.append({"role": msg["role"], "content": msg["content"]})
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=api_messages,
+                max_tokens=max_tokens,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            last_error = e
+            # 如果是 401，继续尝试下一个端点
+            error_str = str(e)
+            if "401" in error_str or "Invalid Authentication" in error_str:
+                continue
+            # 其他错误直接抛出
+            raise
+    # 两个端点都失败
+    if last_error:
+        raise last_error
+    raise RuntimeError("所有 Kimi API 端点均无法连接")
 
 
 def chat_with_advisor(

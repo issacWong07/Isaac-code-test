@@ -30,6 +30,7 @@ from daily_market import build_daily_sector_report
 from ai_advisor import (
     get_api_key, build_system_prompt, chat_with_advisor,
     get_available_models, get_available_providers,
+    save_key, delete_saved_key, load_saved_key,
 )
 
 
@@ -308,26 +309,77 @@ with ai_expander:
         st.session_state.chat_model = default_models[0] if default_models else ""
         st.rerun()
 
-    # API Key 检测与配置
+    # API Key 检测与配置（优先级：环境变量 > Secrets > 本地文件 > 手动输入）
     env_key = get_api_key(selected_provider)
+    local_key = load_saved_key(selected_provider)
+    manual_key = st.session_state.chat_api_key.strip() if st.session_state.chat_api_key else ""
+
     if env_key:
         st.success(f"✅ 已检测到 {selected_provider_name} API Key（来自环境变量或 Secrets）")
         api_key = env_key
+    elif local_key:
+        st.success(f"✅ 已配置 {selected_provider_name} API Key（本地保存）")
+        api_key = local_key
+        # 提供修改和删除按钮
+        col_edit, col_del = st.columns([1, 1])
+        with col_edit:
+            if st.button("✏️ 修改 Key", key=f"edit_key_{selected_provider}"):
+                delete_saved_key(selected_provider)
+                st.session_state.chat_api_key = ""
+                st.rerun()
+        with col_del:
+            if st.button("🗑️ 删除本地 Key", key=f"del_key_{selected_provider}"):
+                delete_saved_key(selected_provider)
+                st.session_state.chat_api_key = ""
+                st.success("已删除本地保存的 Key")
+                st.rerun()
     else:
         st.warning(f"⚠️ 未检测到 {selected_provider_name} API Key")
-        api_key = st.text_input(
-            f"请输入你的 {selected_provider_name} API Key（仅当前会话使用，不会保存）：",
+        new_key = st.text_input(
+            f"请输入你的 {selected_provider_name} API Key：",
             type="password",
-            value=st.session_state.chat_api_key,
+            value=manual_key,
             key="ai_api_key_input",
         )
-        st.session_state.chat_api_key = api_key
-        if not api_key:
+        st.session_state.chat_api_key = new_key.strip()
+
+        remember = st.checkbox("💾 记住此 Key（下次自动填充）", key="remember_key")
+
+        # 测试连接按钮
+        if st.button("🔗 测试连接", key="test_connection"):
+            test_key = st.session_state.chat_api_key.strip()
+            if not test_key:
+                st.error("请先输入 API Key")
+            else:
+                with st.spinner("正在测试连接..."):
+                    try:
+                        test_reply = chat_with_advisor(
+                            [{"role": "user", "content": "Hello"}],
+                            api_key=test_key,
+                            provider=selected_provider,
+                            model=st.session_state.chat_model,
+                            max_tokens=10,
+                        )
+                        if test_reply.startswith("调用 AI 服务失败"):
+                            st.error(f"连接失败：{test_reply}")
+                        else:
+                            st.success("✅ 连接成功！Key 有效。")
+                            if remember:
+                                save_key(selected_provider, test_key)
+                                st.info("已保存到本地，下次自动填充。")
+                    except Exception as e:
+                        st.error(f"连接失败：{e}")
+
+        if not st.session_state.chat_api_key:
             if selected_provider == "kimi":
                 st.info("💡 获取方式：访问 https://platform.moonshot.cn/console/api-keys 创建 API Key")
             else:
                 st.info("💡 获取方式：访问 https://console.anthropic.com/settings/keys 创建 API Key")
             st.stop()
+        api_key = st.session_state.chat_api_key
+        # 如果勾选了记住且当前没有本地保存，自动保存
+        if remember and not local_key:
+            save_key(selected_provider, api_key)
 
     # 模型选择
     model_cols = st.columns([3, 1])
