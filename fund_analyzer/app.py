@@ -20,7 +20,7 @@ from config import (
     PORTFOLIO, RISK_PROFILE, TARGET_ALLOCATION, LOOKBACK_YEARS, BENCHMARK,
     RISK_FREE_RATE, MONTHLY_INVESTMENT_BASE, get_start_date, get_end_date
 )
-from data_fetcher import get_fund_nav, get_fund_info
+from data_fetcher import get_fund_nav, get_fund_info, get_portfolio_realtime_quotes
 from technical_analysis import analyze_fund_technical, compare_funds_risk_return
 from fundamental_analysis import analyze_fundamental
 from fund_comparison import analyze_funds_comparison
@@ -65,6 +65,16 @@ def format_sector_df(df, table_type):
         if "涨跌幅" in df.columns:
             df["涨跌幅"] = df["涨跌幅"].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
     return df
+
+
+def _fmt_money(x):
+    """将数值格式化为人民币金额字符串"""
+    return f"¥{x:,.2f}" if pd.notna(x) else "-"
+
+
+def _fmt_pct(x):
+    """将数值格式化为带符号百分比字符串"""
+    return f"{x:+.2f}%" if pd.notna(x) else "-"
 
 
 st.set_page_config(
@@ -225,6 +235,55 @@ if st.session_state.portfolio:
     df_display["总投入"] = df_display["shares"] * df_display["cost"]
     st.markdown("#### 📋 当前持仓概览")
     st.dataframe(df_display, width='stretch', hide_index=True)
+
+    # 实时估算净值
+    portfolio_dict = {f["code"]: {"name": f["name"]} for f in st.session_state.portfolio}
+    holdings = {f["code"]: f for f in st.session_state.portfolio}
+    with st.spinner("正在获取实时估算净值..."):
+        try:
+            rt_df = get_portfolio_realtime_quotes(portfolio_dict)
+        except Exception as e:
+            rt_df = pd.DataFrame()
+            st.warning(f"获取实时估算净值失败：{e}")
+
+    if not rt_df.empty:
+        st.markdown("#### ⚡ 实时估算净值")
+        rt_display = rt_df.copy()
+
+        rt_display["shares"] = rt_display["code"].map(lambda c: holdings.get(c, {}).get("shares"))
+        rt_display["cost"] = rt_display["code"].map(lambda c: holdings.get(c, {}).get("cost"))
+
+        rt_display["持仓市值"] = rt_display["shares"] * rt_display["estimate_nav"]
+        rt_display["持仓总盈亏"] = rt_display["shares"] * (rt_display["estimate_nav"] - rt_display["cost"])
+        rt_display["总盈亏率"] = (rt_display["estimate_nav"] - rt_display["cost"]) / rt_display["cost"].replace(0, pd.NA) * 100
+        rt_display["当日估算盈亏"] = rt_display["shares"] * (rt_display["estimate_nav"] - rt_display["last_nav"])
+
+        rt_display["estimate_nav"] = rt_display["estimate_nav"].apply(lambda x: f"¥{x:.4f}" if pd.notna(x) else "-")
+        rt_display["estimate_change_pct"] = rt_display["estimate_change_pct"].apply(_fmt_pct)
+        rt_display["last_nav"] = rt_display["last_nav"].apply(lambda x: f"¥{x:.4f}" if pd.notna(x) else "-")
+        rt_display["published_change_pct"] = rt_display["published_change_pct"].apply(_fmt_pct)
+        rt_display["持仓市值"] = rt_display["持仓市值"].apply(_fmt_money)
+        rt_display["持仓总盈亏"] = rt_display["持仓总盈亏"].apply(_fmt_money)
+        rt_display["总盈亏率"] = rt_display["总盈亏率"].apply(_fmt_pct)
+        rt_display["当日估算盈亏"] = rt_display["当日估算盈亏"].apply(_fmt_money)
+
+        rt_display = rt_display.rename(columns={
+            "code": "基金代码",
+            "name": "基金名称",
+            "estimate_nav": "估算净值",
+            "estimate_change_pct": "估算涨跌幅",
+            "last_nav": "最新单位净值",
+            "published_change_pct": "日增长率",
+            "update_time": "更新时间",
+        })
+        display_cols = [
+            "基金代码", "基金名称", "估算净值", "估算涨跌幅", "最新单位净值", "日增长率",
+            "持仓市值", "持仓总盈亏", "总盈亏率", "当日估算盈亏", "更新时间"
+        ]
+        rt_display = rt_display[[c for c in display_cols if c in rt_display.columns]]
+        st.dataframe(rt_display, width='stretch', hide_index=True)
+    else:
+        st.info("当前非交易时段或实时数据暂不可用，已显示历史净值信息。")
 else:
     st.warning("⚠️ 请在左侧添加至少一只基金后再开始分析。")
 

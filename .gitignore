@@ -34,3 +34,12 @@ xhs_results*.json
 *.docx
 *.html
 .streamlit/secrets.toml
+
+# Claude Code
+.claude/
+
+# 根目录临时脚本
+package.json
+package-lock.json
+scrape_xhs*.js
+create_ppt.py

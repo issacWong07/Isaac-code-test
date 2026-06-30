@@ -499,3 +499,189 @@ def get_board_change():
     except Exception as e:
         print(f"[ERROR] 获取板块异动失败: {e}")
         return pd.DataFrame()
+
+
+def _is_market_open():
+    """判断当前是否处于 A 股交易时段（9:30-11:30, 13:00-15:00，工作日）"""
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    time_str = now.strftime("%H:%M")
+    return ("09:30" <= time_str <= "11:30") or ("13:00" <= time_str <= "15:00")
+
+
+def _realtime_cache_ttl_minutes():
+    """根据是否处于交易时段返回实时数据缓存分钟数"""
+    return 5 if _is_market_open() else 60
+
+
+def _find_column(df, substring):
+    """按子串查找列名，返回第一个匹配的列名或 None"""
+    for col in df.columns:
+        if substring in col:
+            return col
+    return None
+
+
+def _find_last_nav_column(df):
+    """查找上一交易日单位净值列（带日期前缀且不含'公布数据'）"""
+    for col in df.columns:
+        col_str = str(col)
+        if "单位净值" in col_str and "公布数据" not in col_str:
+            return col
+    return None
+
+
+def _parse_pct(value):
+    """解析百分比字符串为浮点数"""
+    if pd.isna(value) or value == "---":
+        return None
+    if isinstance(value, str):
+        value = value.replace("%", "").strip()
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_nav(value):
+    """解析净值数值"""
+    if pd.isna(value) or value == "---":
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _fetch_fund_estimation_all():
+    """获取全部基金估算净值原始数据"""
+    _rate_limit()
+    df = _with_retry(lambda: ak.fund_value_estimation_em(symbol="全部"))
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.copy()
+    df.columns = [str(c) for c in df.columns]
+    return df
+
+
+def get_fund_realtime_quote(fund_code):
+    """
+    获取基金实时估算净值与当日涨跌幅
+    返回 dict: {
+        "code": 基金代码,
+        "name": 基金名称,
+        "estimate_nav": 估算净值(float),
+        "estimate_change_pct": 估算涨跌幅(float, 如 1.25),
+        "last_nav": 最新公布单位净值(float),
+        "published_change_pct": 已公布日增长率(float),
+        "deviation": 估算偏差(str/float),
+        "update_time": 数据时间(str),
+    }
+    """
+    fund_code = str(fund_code).strip().zfill(6)
+    cache_key = f"fund_realtime_{fund_code}"
+    ttl_hours = _realtime_cache_ttl_minutes() / 60.0
+    cached = _load_cache(cache_key, max_age_hours=ttl_hours)
+    if cached is not None:
+        return cached
+
+    try:
+        df = _fetch_fund_estimation_all()
+        if df.empty:
+            return {}
+
+        row = df[df[_find_column(df, "基金代码")] == fund_code]
+        if row.empty:
+            return {}
+        row = row.iloc[0]
+
+        estimate_col = _find_column(df, "估算数据-估算值")
+        estimate_change_col = _find_column(df, "估算数据-估算增长率")
+        last_nav_col = _find_column(df, "公布数据-单位净值")
+        historical_nav_col = _find_last_nav_column(df)
+        published_change_col = _find_column(df, "公布数据-日增长率")
+        deviation_col = _find_column(df, "估算偏差")
+        name_col = _find_column(df, "基金名称")
+
+        last_nav = _parse_nav(row[last_nav_col]) if last_nav_col else None
+        if last_nav is None and historical_nav_col:
+            last_nav = _parse_nav(row[historical_nav_col])
+
+        result = {
+            "code": fund_code,
+            "name": row[name_col] if name_col and pd.notna(row[name_col]) else None,
+            "estimate_nav": _parse_nav(row[estimate_col]) if estimate_col else None,
+            "estimate_change_pct": _parse_pct(row[estimate_change_col]) if estimate_change_col else None,
+            "last_nav": last_nav,
+            "published_change_pct": _parse_pct(row[published_change_col]) if published_change_col else None,
+            "deviation": row[deviation_col] if deviation_col and pd.notna(row[deviation_col]) else None,
+            "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _save_cache(cache_key, result)
+        return result
+    except Exception as e:
+        print(f"[ERROR] 获取基金 {fund_code} 实时行情失败: {e}")
+        return {}
+
+
+def get_portfolio_realtime_quotes(portfolio_dict):
+    """
+    批量获取持仓基金实时行情
+    portfolio_dict: {code: {"name": ...}}
+    返回 DataFrame: [code, name, estimate_nav, estimate_change_pct, last_nav, published_change_pct, update_time]
+    """
+    if not portfolio_dict:
+        return pd.DataFrame()
+
+    codes = [str(c).strip().zfill(6) for c in portfolio_dict.keys()]
+    cache_key = f"portfolio_realtime_{'_'.join(sorted(codes))}"
+    ttl_hours = _realtime_cache_ttl_minutes() / 60.0
+    cached = _load_cache(cache_key, max_age_hours=ttl_hours)
+    if cached is not None:
+        return cached
+
+    try:
+        df = _fetch_fund_estimation_all()
+        if df.empty:
+            return pd.DataFrame()
+
+        code_col = _find_column(df, "基金代码")
+        name_col = _find_column(df, "基金名称")
+        estimate_col = _find_column(df, "估算数据-估算值")
+        estimate_change_col = _find_column(df, "估算数据-估算增长率")
+        last_nav_col = _find_column(df, "公布数据-单位净值")
+        historical_nav_col = _find_last_nav_column(df)
+        published_change_col = _find_column(df, "公布数据-日增长率")
+
+        filtered = df[df[code_col].isin(codes)].copy()
+        if filtered.empty:
+            return pd.DataFrame()
+
+        records = []
+        update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for _, row in filtered.iterrows():
+            code = row[code_col]
+            last_nav = _parse_nav(row[last_nav_col]) if last_nav_col else None
+            if last_nav is None and historical_nav_col:
+                last_nav = _parse_nav(row[historical_nav_col])
+            records.append({
+                "code": code,
+                "name": row[name_col] if name_col and pd.notna(row[name_col]) else portfolio_dict.get(code, {}).get("name", ""),
+                "estimate_nav": _parse_nav(row[estimate_col]) if estimate_col else None,
+                "estimate_change_pct": _parse_pct(row[estimate_change_col]) if estimate_change_col else None,
+                "last_nav": last_nav,
+                "published_change_pct": _parse_pct(row[published_change_col]) if published_change_col else None,
+                "update_time": update_time,
+            })
+
+        result = pd.DataFrame(records)
+        _save_cache(cache_key, result)
+        return result
+    except Exception as e:
+        print(f"[ERROR] 获取持仓实时行情失败: {e}")
+        return pd.DataFrame()
